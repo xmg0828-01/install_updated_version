@@ -44,6 +44,19 @@ def load_config():
         try:
             with open(CONFIG_FILE, 'r') as f:
                 config = json.load(f)
+            
+            # 确保配置文件包含所有必需字段
+            updated = False
+            for key, value in DEFAULT_CONFIG.items():
+                if key not in config:
+                    config[key] = value
+                    updated = True
+                    logger.info(f"添加缺失的配置字段: {key}")
+            
+            if updated:
+                save_config(config)
+                logger.info("配置文件已更新")
+            
             logger.info(f"已从 {CONFIG_FILE} 加载配置")
             return config
         except Exception as e:
