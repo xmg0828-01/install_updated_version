@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # 创建并执行安装脚本
-cat > /root/install_secure_version.sh << 'EOF'
+cat > /root/install_simple_auth_version.sh << 'EOF'
 #!/bin/bash
 
-# 创建带权限控制的混合模式签到脚本
-cat > /root/secure_tg_hybrid_bot.py << 'EOFPY'
+# 创建简单权限控制版本的混合模式签到脚本
+cat > /root/simple_auth_tg_hybrid_bot.py << 'EOFPY'
 #!/usr/bin/env python3
 import os, json, logging, asyncio
 from datetime import datetime
@@ -24,9 +24,11 @@ DEFAULT_CONFIG = {
     'api_hash': None,
     'bot_token': None,
     'user_phone': None,
-    'authorized_users': [],  # 授权用户列表
     'tasks': []
 }
+
+# 全局变量 - 授权用户ID（在启动时设置）
+AUTHORIZED_USER_ID = None
 
 # 保存/加载配置
 def save_config(config):
@@ -44,19 +46,6 @@ def load_config():
         try:
             with open(CONFIG_FILE, 'r') as f:
                 config = json.load(f)
-            
-            # 确保配置文件包含所有必需字段
-            updated = False
-            for key, value in DEFAULT_CONFIG.items():
-                if key not in config:
-                    config[key] = value
-                    updated = True
-                    logger.info(f"添加缺失的配置字段: {key}")
-            
-            if updated:
-                save_config(config)
-                logger.info("配置文件已更新")
-            
             logger.info(f"已从 {CONFIG_FILE} 加载配置")
             return config
         except Exception as e:
@@ -65,20 +54,16 @@ def load_config():
     logger.info("使用默认配置")
     return DEFAULT_CONFIG
 
-# 权限检查装饰器
-def auth_required(func):
-    async def wrapper(event):
-        sender = await event.get_sender()
-        sender_id = sender.id
-        
-        # 检查是否为授权用户
-        if sender_id not in config['authorized_users']:
-            await event.respond("❌ 您没有权限使用此机器人。请联系管理员添加您的用户ID。")
-            logger.warning(f"未授权用户 {sender_id} (@{sender.username}) 尝试使用机器人")
-            return
-        
-        await func(event)
-    return wrapper
+# 权限检查函数
+async def check_permission(event):
+    sender = await event.get_sender()
+    sender_id = sender.id
+    
+    if sender_id != AUTHORIZED_USER_ID:
+        await event.respond(f"❌ 您没有权限使用此机器人。\n您的用户ID: {sender_id}\n只有用户ID {AUTHORIZED_USER_ID} 可以使用此机器人。")
+        logger.warning(f"未授权用户 {sender_id} (@{getattr(sender, 'username', 'None')}) 尝试使用机器人")
+        return False
+    return True
 
 # 发送命令函数(由用户账户执行)
 async def send_command(user_client, username, cmd, retry_interval=300, max_retries=3, retries=0):
@@ -99,7 +84,8 @@ async def send_command(user_client, username, cmd, retry_interval=300, max_retri
 
 # 主程序
 async def main():
-    global config
+    global AUTHORIZED_USER_ID
+    
     # 加载配置
     config = load_config()
     
@@ -110,14 +96,6 @@ async def main():
         config['api_hash'] = input("请输入API Hash: ").strip()
         config['bot_token'] = input("请输入Bot Token: ").strip()
         config['user_phone'] = input("请输入您的手机号码(带国家代码，如+86xxx): ").strip()
-        
-        # 如果没有授权用户，询问是否添加当前用户
-        if not config['authorized_users']:
-            print("\n===== 权限设置 =====")
-            print("您需要设置授权用户才能使用机器人。")
-            print("1. 启动机器人后，向机器人发送 /myid 获取您的用户ID")
-            print("2. 然后使用 /auth [用户ID] 命令添加授权用户")
-            
         save_config(config)
     
     # 创建机器人客户端
@@ -132,18 +110,16 @@ async def main():
     
     if not await user.is_user_authorized():
         logger.info("需要登录您的Telegram账户")
+        await user.send_code_request(config['user_phone'])
         code = input("请输入收到的验证码: ")
         await user.sign_in(config['user_phone'], code)
     
     user_me = await user.get_me()
     logger.info(f"用户账户已登录: {user_me.first_name} (@{user_me.username})")
     
-    # 自动添加机器人所有者为授权用户
-    owner_id = user_me.id
-    if owner_id not in config['authorized_users']:
-        config['authorized_users'].append(owner_id)
-        save_config(config)
-        logger.info(f"已自动添加机器人所有者 {owner_id} 为授权用户")
+    # 设置授权用户ID为登录用户的ID
+    AUTHORIZED_USER_ID = user_me.id
+    logger.info(f"授权用户ID: {AUTHORIZED_USER_ID}")
     
     # 创建调度器(用于用户客户端执行任务)
     scheduler = AsyncIOScheduler()
@@ -175,20 +151,9 @@ async def main():
     # 处理/start命令
     @bot.on(events.NewMessage(pattern='/start'))
     async def start_handler(event):
-        sender = await event.get_sender()
-        sender_id = sender.id
-        
-        if sender_id not in config['authorized_users']:
-            await event.respond(
-                f"👋 欢迎使用Telegram签到机器人!\n\n"
-                f"❌ 您的用户ID: {sender_id}\n"
-                f"您尚未被授权使用此机器人。\n\n"
-                f"请联系机器人管理员，让他们使用以下命令添加您:\n"
-                f"`/auth {sender_id}`\n\n"
-                f"或者发送 /myid 获取您的用户ID"
-            )
+        if not await check_permission(event):
             return
-        
+            
         await event.respond(
             "👋 欢迎使用Telegram签到机器人!\n\n"
             "🔹 /add_daily - 添加每日签到任务\n"
@@ -196,108 +161,35 @@ async def main():
             "🔹 /list - 查看所有任务\n"
             "🔹 /delete - 删除指定任务\n"
             "🔹 /help - 显示帮助信息\n"
-            "🔹 /myid - 获取您的用户ID\n"
-            "🔹 /auth - 授权管理 (仅所有者)\n"
-            "🔹 /users - 查看授权用户列表\n\n"
+            "🔹 /myid - 获取您的用户ID\n\n"
             "添加的任务将由您的个人账户执行"
         )
     
-    # 处理/myid命令 - 获取用户ID
+    # 处理/myid命令
     @bot.on(events.NewMessage(pattern='/myid'))
     async def myid_handler(event):
         sender = await event.get_sender()
         sender_id = sender.id
-        username = sender.username or "无用户名"
-        first_name = sender.first_name or "无名称"
+        username = getattr(sender, 'username', '无用户名')
+        first_name = getattr(sender, 'first_name', '无名称')
+        
+        is_authorized = sender_id == AUTHORIZED_USER_ID
         
         await event.respond(
             f"👤 您的信息:\n"
             f"用户ID: `{sender_id}`\n"
             f"用户名: @{username}\n"
             f"名称: {first_name}\n\n"
-            f"授权状态: {'✅ 已授权' if sender_id in config['authorized_users'] else '❌ 未授权'}"
+            f"授权状态: {'✅ 已授权' if is_authorized else '❌ 未授权'}\n"
+            f"机器人所有者ID: {AUTHORIZED_USER_ID}"
         )
-    
-    # 处理/auth命令 - 仅机器人所有者可用
-    @bot.on(events.NewMessage(pattern='/auth'))
-    async def auth_handler(event):
-        sender = await event.get_sender()
-        sender_id = sender.id
-        
-        # 只有机器人所有者可以管理授权
-        if sender_id != owner_id:
-            await event.respond("❌ 只有机器人所有者可以管理用户授权。")
-            return
-        
-        message = event.message.text.strip()
-        parts = message.split()
-        
-        if len(parts) == 1:  # 只有/auth命令
-            await event.respond(
-                "👑 授权管理命令:\n\n"
-                "🔹 添加授权用户: `/auth add [用户ID]`\n"
-                "🔹 移除授权用户: `/auth remove [用户ID]`\n"
-                "🔹 查看授权列表: `/users`\n\n"
-                "例如: `/auth add 123456789`"
-            )
-            return
-        
-        if len(parts) == 3:
-            action, user_id_str = parts[1], parts[2]
-            try:
-                target_user_id = int(user_id_str)
-                
-                if action == 'add':
-                    if target_user_id not in config['authorized_users']:
-                        config['authorized_users'].append(target_user_id)
-                        save_config(config)
-                        await event.respond(f"✅ 已添加用户 {target_user_id} 到授权列表")
-                        logger.info(f"所有者 {sender_id} 添加了授权用户 {target_user_id}")
-                    else:
-                        await event.respond(f"⚠️ 用户 {target_user_id} 已经在授权列表中")
-                
-                elif action == 'remove':
-                    if target_user_id == owner_id:
-                        await event.respond("❌ 不能移除机器人所有者的授权")
-                        return
-                    
-                    if target_user_id in config['authorized_users']:
-                        config['authorized_users'].remove(target_user_id)
-                        save_config(config)
-                        await event.respond(f"✅ 已从授权列表移除用户 {target_user_id}")
-                        logger.info(f"所有者 {sender_id} 移除了授权用户 {target_user_id}")
-                    else:
-                        await event.respond(f"⚠️ 用户 {target_user_id} 不在授权列表中")
-                
-                else:
-                    await event.respond("❌ 无效操作。使用 add 或 remove")
-                    
-            except ValueError:
-                await event.respond("❌ 用户ID必须是数字")
-        else:
-            await event.respond("请按格式发送: /auth [add/remove] [用户ID]")
-    
-    # 处理/users命令 - 查看授权用户
-    @bot.on(events.NewMessage(pattern='/users'))
-    @auth_required
-    async def users_handler(event):
-        if not config['authorized_users']:
-            await event.respond("⚠️ 当前没有授权用户")
-            return
-        
-        message = "👥 授权用户列表:\n\n"
-        for i, user_id in enumerate(config['authorized_users'], 1):
-            if user_id == owner_id:
-                message += f"{i}. {user_id} (所有者)\n"
-            else:
-                message += f"{i}. {user_id}\n"
-        
-        await event.respond(message)
     
     # 处理/help命令
     @bot.on(events.NewMessage(pattern='/help'))
-    @auth_required
     async def help_handler(event):
+        if not await check_permission(event):
+            return
+            
         await event.respond(
             "📌 使用指南:\n\n"
             "1️⃣ 添加每日签到任务:\n"
@@ -315,8 +207,10 @@ async def main():
     
     # 处理/add_daily命令
     @bot.on(events.NewMessage(pattern='/add_daily'))
-    @auth_required
     async def add_daily_handler(event):
+        if not await check_permission(event):
+            return
+            
         message = event.message.text.strip()
         parts = message.split()
         
@@ -358,8 +252,10 @@ async def main():
     
     # 处理/add_monthly命令
     @bot.on(events.NewMessage(pattern='/add_monthly'))
-    @auth_required
     async def add_monthly_handler(event):
+        if not await check_permission(event):
+            return
+            
         message = event.message.text.strip()
         parts = message.split()
         
@@ -407,8 +303,10 @@ async def main():
     
     # 处理/list命令
     @bot.on(events.NewMessage(pattern='/list'))
-    @auth_required
     async def list_tasks_handler(event):
+        if not await check_permission(event):
+            return
+            
         tasks = config['tasks']
         
         if not tasks:
@@ -426,8 +324,10 @@ async def main():
     
     # 处理/delete命令 - 新格式: /delete username command time
     @bot.on(events.NewMessage(pattern='/delete'))
-    @auth_required
     async def delete_task_handler(event):
+        if not await check_permission(event):
+            return
+            
         message = event.message.text.strip()
         parts = message.split()
         
@@ -502,7 +402,7 @@ if __name__ == "__main__":
 EOFPY
 
 # 设置执行权限
-chmod +x /root/secure_tg_hybrid_bot.py
+chmod +x /root/simple_auth_tg_hybrid_bot.py
 
 # 安装依赖
 apt-get update
@@ -512,23 +412,23 @@ source /root/tg_hybrid_env/bin/activate
 pip install telethon apscheduler
 
 # 创建启动脚本
-cat > /root/start_secure_hybrid.sh << 'EOFSH'
+cat > /root/start_simple_auth_hybrid.sh << 'EOFSH'
 #!/bin/bash
 source /root/tg_hybrid_env/bin/activate
 cd /root
-python3 secure_tg_hybrid_bot.py
+python3 simple_auth_tg_hybrid_bot.py
 EOFSH
 
-chmod +x /root/start_secure_hybrid.sh
+chmod +x /root/start_simple_auth_hybrid.sh
 
 # 创建系统服务
-cat > /etc/systemd/system/tg-secure-hybrid.service << 'EOFSV'
+cat > /etc/systemd/system/tg-simple-auth-hybrid.service << 'EOFSV'
 [Unit]
-Description=Telegram混合模式签到机器人(安全版)
+Description=Telegram混合模式签到机器人(简单权限版)
 After=network.target
 
 [Service]
-ExecStart=/root/tg_hybrid_env/bin/python /root/secure_tg_hybrid_bot.py
+ExecStart=/root/tg_hybrid_env/bin/python /root/simple_auth_tg_hybrid_bot.py
 WorkingDirectory=/root
 Restart=always
 User=root
@@ -543,39 +443,30 @@ EOFSV
 systemctl daemon-reload
 
 echo "=============================="
-echo "✅ 安全版本安装完成!"
+echo "✅ 简单权限版本安装完成!"
 echo ""
-echo "🔐 安全特性:"
-echo "- 只有授权用户可以使用机器人"
-echo "- 机器人所有者自动获得管理权限"
-echo "- 新增用户权限管理功能"
+echo "🔐 权限控制:"
+echo "- 只有您(机器人所有者)可以使用机器人"
+echo "- 自动识别您的用户ID作为唯一授权用户"
+echo "- 其他用户无法执行任何命令"
 echo ""
 echo "您可以通过以下方式运行:"
 echo ""
 echo "1. 直接运行(前台):"
-echo "   /root/start_secure_hybrid.sh"
+echo "   /root/start_simple_auth_hybrid.sh"
 echo ""
 echo "2. 作为系统服务运行(推荐):"
-echo "   systemctl enable tg-secure-hybrid.service"
-echo "   systemctl start tg-secure-hybrid.service"
+echo "   systemctl enable tg-simple-auth-hybrid.service"
+echo "   systemctl start tg-simple-auth-hybrid.service"
 echo ""
-echo "🔥 新增命令:"
-echo "  /myid - 获取用户ID"
-echo "  /auth add [用户ID] - 添加授权用户(仅所有者)"
-echo "  /auth remove [用户ID] - 移除授权用户(仅所有者)"
-echo "  /users - 查看授权用户列表"
-echo ""
-echo "📋 使用步骤:"
-echo "1. 启动后您(机器人所有者)自动获得授权"
-echo "2. 其他用户发送 /myid 获取用户ID"
-echo "3. 您使用 /auth add [用户ID] 授权其他用户"
+echo "🔹 新增命令: /myid - 查看用户ID和授权状态"
 echo "=============================="
 
 # 启动服务
-systemctl enable tg-secure-hybrid.service
-systemctl start tg-secure-hybrid.service
+systemctl enable tg-simple-auth-hybrid.service
+systemctl start tg-simple-auth-hybrid.service
 EOF
 
 # 设置执行权限并运行
-chmod +x /root/install_secure_version.sh
-/root/install_secure_version.sh
+chmod +x /root/install_simple_auth_version.sh
+/root/install_simple_auth_version.sh
